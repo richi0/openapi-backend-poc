@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	generated "openapi/generated"
 	"strings"
 
@@ -14,7 +15,34 @@ import (
 	"github.com/labstack/gommon/log"
 )
 
+type DB struct {
+	pets    []generated.Pet
+	counter int64
+}
+
+func (d *DB) AddPet(newPet *generated.NewPet) generated.Pet {
+	pet := generated.Pet{Id: d.counter, Name: newPet.Name, Tag: newPet.Tag}
+	d.pets = append(d.pets, pet)
+	d.counter++
+	return pet
+}
+
+func (d *DB) DeletePet(id int64) {
+	filteredPets := make([]generated.Pet, 0)
+	for _, pet := range d.pets {
+		if pet.Id != id {
+			filteredPets = append(filteredPets, pet)
+		}
+	}
+	d.pets = filteredPets
+}
+
+func NewDB() *DB {
+	return &DB{pets: make([]generated.Pet, 0), counter: 0}
+}
+
 type server struct {
+	db *DB
 }
 
 func (s server) AddPet(c echo.Context) error {
@@ -24,12 +52,12 @@ func (s server) AddPet(c echo.Context) error {
 		log.Error("cannot read body")
 		return nil
 	}
-	fmt.Println(pet.Name)
-	return nil
+	return c.JSON(http.StatusOK, s.db.AddPet(&pet))
 }
 
 func (s server) DeletePet(c echo.Context, id int64) error {
-	return nil
+	s.db.DeletePet(id)
+	return c.String(http.StatusOK, fmt.Sprintf("Deleted %d", id))
 }
 
 func (s server) FindPetById(c echo.Context, id int64) error {
@@ -37,8 +65,10 @@ func (s server) FindPetById(c echo.Context, id int64) error {
 }
 
 func (s server) FindPets(c echo.Context, params generated.FindPetsParams) error {
-	return nil
+	return c.JSON(http.StatusOK, s.db.pets)
 }
+
+var swaggerSpec, _ = generated.GetSwagger()
 
 var basicAuth = middleware.BasicAuth(func(username, password string, c echo.Context) (bool, error) {
 	if subtle.ConstantTimeCompare([]byte(username), []byte("joe")) == 1 &&
@@ -48,20 +78,22 @@ var basicAuth = middleware.BasicAuth(func(username, password string, c echo.Cont
 	return false, nil
 })
 
+var validation = oapimiddleware.OapiRequestValidatorWithOptions(swaggerSpec, &oapimiddleware.Options{Skipper: func(c echo.Context) bool {
+	if strings.Contains(c.Request().URL.Path, "/documentation") {
+		return true
+	}
+	return false
+}})
+
+var cors = middleware.CORSWithConfig(middleware.CORSConfig{
+	AllowOrigins: []string{"*"},
+})
+
 func main() {
 	e := echo.New()
-	swaggerSpec, err := generated.GetSwagger()
-	if err != nil {
-		panic("Cannot load swaggerSpec")
-	}
-	validation := oapimiddleware.OapiRequestValidatorWithOptions(swaggerSpec, &oapimiddleware.Options{Skipper: func(c echo.Context) bool {
-		if strings.Contains(c.Request().URL.Path, "/documentation") {
-			return true
-		}
-		return false
-	}})
+	e.Use(cors)
 	e.Use(validation)
 	e.File("/documentation", "documentation/index.html", basicAuth)
-	generated.RegisterHandlers(e, server{})
+	generated.RegisterHandlers(e, server{NewDB()})
 	e.Logger.Fatal(e.Start(":8080"))
 }
